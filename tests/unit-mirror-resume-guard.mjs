@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deleteSession, openSession } from "cc-session-io";
 import { QueryContext, ctx } from "../src/query-state.js";
+import { priorDigests } from "../src/priors-fingerprint.js";
 
 const tmpRoot = mkdtempSync(join(tmpdir(), "claude-bridge-mirror-guard-"));
 const claudeDir = join(tmpRoot, "claude");
@@ -303,6 +304,59 @@ describe("syncSharedSession mirror digests", () => {
 });
 
 describe("mirror digests through real turns", () => {
+	it("fences a rotated live writer's delivery, completion, error and abort from the replacement mirror", async () => {
+		for (const ending of ["success", "error", "abort", "abort-error"]) {
+			const sessionId = `pi-displaced-${ending}`;
+			const old = conversation(6, "DISPLACED");
+			const first = [...old, user("go")];
+			const delivered = [...first, call(`toolu_${ending}`), result(`toolu_${ending}`)];
+			const g = gate();
+			const controller = new AbortController();
+			scripts.push([init("cc-displaced"), ...toolUse(`toolu_${ending}`), g.wait,
+				...(ending.endsWith("error") ? [() => { throw new Error("displaced failure"); }] : [done()])]);
+			await providerConfig.streamSimple(model, { messages: first, tools: [readTool] },
+				{ sessionId, signal: controller.signal }).result();
+			const displaced = stateOf(sessionId);
+
+			// Another call rewrites the same-length history while the original query is live.
+			const rewritten = [...conversation(6, "REPLACEMENT"), user("new go")];
+			await plainTurn(sessionId, rewritten);
+			const replacement = structuredClone(stateOf(sessionId));
+			assert.notEqual(replacement.sessionId, displaced.sessionId, "the live writer's file was rotated");
+			assert.deepEqual(replacement.priorDigests, priorDigests(rewritten.slice(0, -1)));
+			assert.match(mirrorText(replacement.sessionId), /REPLACEMENT_5/);
+
+			const continuation = stream(sessionId, delivered);
+			const afterDelivery = structuredClone(stateOf(sessionId));
+			if (ending.startsWith("abort")) controller.abort();
+			g.open();
+			await continuation.result();
+			await settle();
+			const afterCompletion = structuredClone(stateOf(sessionId));
+			// Collect both snapshots before asserting: even the baseline completes its writer.
+			assert.deepEqual({ afterDelivery, afterCompletion },
+				{ afterDelivery: replacement, afterCompletion: replacement },
+				`${ending}: displaced query cannot mutate or erase the replacement mirror`);
+
+			const before = staleLines();
+			await plainTurn(sessionId, [...rewritten, say("replacement reply"), user("next")]);
+			assert.equal(calls.at(-1).resume, replacement.sessionId);
+			assert.equal(staleLines(), before, "replacement fingerprints describe its own conversation");
+		}
+	});
+
+	it("a first-query A-to-B rewrite rebuilds rather than fingerprinting the rewritten context as sent history", async () => {
+		const sessionId = "pi-first-rewritten";
+		const sent = [user("FIRST_SENT_A")];
+		const rewritten = [user("FIRST_REWRITTEN_B"), call("toolu_1"), result("toolu_1")];
+		await toolTurn(sessionId, sent, rewritten);
+		const before = staleLines();
+		await plainTurn(sessionId, [...rewritten, say("reply"), user("next")]);
+		assert.equal(staleLines(), before + 1, "the next turn detects history different from what CC received");
+		assert.match(calls.at(-1).mirror, /FIRST_REWRITTEN_B/, "rebuilt from pi's current history");
+		assert.doesNotMatch(calls.at(-1).mirror, /FIRST_SENT_A/);
+	});
+
 	it("a normal tool-using turn does not look stale to the next one", async () => {
 		const sessionId = "pi-quiet";
 		const base = conversation(8, "Q");

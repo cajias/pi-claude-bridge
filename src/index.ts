@@ -248,6 +248,23 @@ function sessionKey(piSessionId: string | null | undefined): string {
  *  session's reads, writes and teardown marks touch only its own mirror. */
 const sharedSessions = new Map<string, SessionState>();
 
+// A query may finish after another call rebuilt (even under the same CC UUID) or
+// claimed its mirror. Keep ownership separate from SessionState's copied objects.
+interface QueryMirror {
+	owner: object;
+	piSessionId: string | null;
+	digests?: string[];
+	pendingDigests?: string[];
+}
+const mirrorOwners = new Map<string, object>();
+const queryMirrors = new WeakMap<QueryContext, QueryMirror>();
+
+function ownsMirror(c: QueryContext, mirror = queryMirrors.get(c)): boolean {
+	// Direct low-level helpers can be used without a provider query. Every provider
+	// query has a snapshot, including history-less queries that preserve the mirror.
+	return mirror ? mirrorOwners.get(sessionKey(mirror.piSessionId)) === mirror.owner : !c.preservesMirror;
+}
+
 /** The mirror for `piSessionId`, or null when this session has none yet. */
 function sessionStateFor(piSessionId: string | null | undefined): SessionState | null {
 	return sharedSessions.get(sessionKey(piSessionId)) ?? null;
@@ -255,8 +272,10 @@ function sessionStateFor(piSessionId: string | null | undefined): SessionState |
 
 /** Replace (or plant) the mirror for `piSessionId`. */
 function setSessionStateFor(piSessionId: string | null | undefined, state: SessionState | null): void {
-	if (state === null) sharedSessions.delete(sessionKey(piSessionId));
-	else sharedSessions.set(sessionKey(piSessionId), state);
+	const key = sessionKey(piSessionId);
+	if (state === null || state.sessionId !== sessionStateFor(piSessionId)?.sessionId) mirrorOwners.delete(key);
+	if (state === null) sharedSessions.delete(key);
+	else sharedSessions.set(key, state);
 }
 
 // pi replaced one of its sessions' history (compact, tree) rather than appending
@@ -825,7 +844,8 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 		return { sessionId: null, preserveSharedSession: true };
 	}
 
-	// REBUILD path
+	// REBUILD path — the old query no longer owns the replacement, even if its UUID stays.
+	mirrorOwners.delete(sessionKey(piSessionId));
 	if (priorMessages.length === 0) {
 		debug(`Case 1: clean start, ${history.length} total messages`);
 		debug(`syncResult: path=clean-start`);
@@ -869,13 +889,18 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	return { sessionId: session.sessionId };
 }
 
-/** What the mirror holds once a query on it completes: its recorded digests extended over the
- *  messages the query saw. A mirror this query created has no record yet, so it starts one;
- *  only the attributed sessions keep digests (see SessionState.priorDigests). */
-function mirrorDigests(state: SessionState | null, c: QueryContext, initial: Context["messages"]): string[] | undefined {
-	const seen = stableMessages(c.latestMessages.length > initial.length ? c.latestMessages : initial);
-	if (state) return extendDigests(state.priorDigests, seen);
-	return c.piSessionId ? priorDigests(seen) : undefined;
+/** Commit only settled history. Trailing users are kept query-local until a later
+ *  tool continuation settles them: that preserves the prompt actually sent (A, not
+ *  a mid-query rewrite B), without fingerprinting per-call nudges pi never stores. */
+function recordMirrorMessages(mirror: QueryMirror, messages: readonly { role: string }[]): void {
+	if (!mirror.digests) return;
+	const settled = stableMessages(messages);
+	// A removed per-call user must not occupy the following assistant/tool slot.
+	let pendingEnd = mirror.digests.length;
+	while (pendingEnd < settled.length && pendingEnd < (mirror.pendingDigests?.length ?? 0) && settled[pendingEnd].role === "user") pendingEnd++;
+	const pending = mirror.pendingDigests?.slice(mirror.digests.length, pendingEnd) ?? [];
+	mirror.digests = extendDigests([...mirror.digests, ...pending], settled);
+	mirror.pendingDigests = priorDigests(messages);
 }
 
 /** The part of a call's context that is settled history: everything before its trailing run of
@@ -899,7 +924,7 @@ export const __test = {
 	},
 	resetSharedSession(piSessionId?: string | null) {
 		// No id: full reset (the pre-map semantics — tests start from a blank slate).
-		if (piSessionId === undefined) sharedSessions.clear();
+		if (piSessionId === undefined) { sharedSessions.clear(); mirrorOwners.clear(); }
 		else setSessionStateFor(piSessionId, null);
 		historyRewrittenBySession.clear();
 	},
@@ -1629,7 +1654,7 @@ function steerBlocks(messages: Context["messages"]): ContentBlockParam[] | null 
 function steerMissedSession(c: QueryContext, text: string): void {
 	c.missedSteer = true;
 	const state = sessionStateFor(c.piSessionId);
-	if (state) setSessionStateFor(c.piSessionId, { ...state, needsRebuild: true });
+	if (state && ownsMirror(c)) setSessionStateFor(c.piSessionId, { ...state, needsRebuild: true });
 	debug(`provider: steer never reached CC, marked query for rebuild: ${text.slice(0, 60)}`);
 }
 
@@ -1754,7 +1779,7 @@ function discardRewrittenQuery(c: QueryContext): void {
 	// exactly as after an abort. Only this session's mirror: the discarding query
 	// proves its own conversation is the one being rebuilt around.
 	const state = sessionStateFor(c.piSessionId);
-	if (state) setSessionStateFor(c.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
+	if (state && ownsMirror(c)) setSessionStateFor(c.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
 	if (c.piSessionId) historyRewrittenBySession.delete(c.piSessionId);
 	debug("provider: history rewritten under a parked query — discarded it, rebuilding from current history");
 }
@@ -1836,10 +1861,14 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// A history-less query (preservesMirror) never writes to the mirror, so its shorter
 		// message count says nothing about it: lowering the cursor here is how a compressed
 		// 46-message view resumed a 3,000-message mirror one turn later.
+		const mirror = queryMirrors.get(resultCtx);
+		if (mirror) recordMirrorMessages(mirror, context.messages);
 		const state = sessionStateFor(resultCtx.piSessionId);
 		if (state && !resultCtx.preservesMirror) {
-			state.cursor = context.messages.length;
-			state.priorDigests = extendDigests(state.priorDigests, stableMessages(context.messages));
+			if (ownsMirror(resultCtx)) {
+				state.cursor = context.messages.length;
+				state.priorDigests = mirror?.digests;
+			}
 		}
 		if (context.messages.length > resultCtx.latestCursor) resultCtx.latestMessages = context.messages;
 		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, context.messages.length);
@@ -1957,6 +1986,13 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	if (piSessionId) historyRewrittenBySession.delete(piSessionId);
 	const { sessionId: resumeSessionId } = syncResult;
 	queryCtx.preservesMirror = Boolean(syncResult.preserveSharedSession);
+	const queryMirror: QueryMirror = {
+		owner: {}, piSessionId,
+		digests: piSessionId ? extendDigests(sessionStateFor(piSessionId)?.priorDigests ?? [], stableMessages(context.messages)) : undefined,
+		pendingDigests: piSessionId ? priorDigests(context.messages) : undefined,
+	};
+	queryMirrors.set(queryCtx, queryMirror);
+	if (!queryCtx.preservesMirror) mirrorOwners.set(sessionKey(piSessionId), queryMirror.owner);
 	const promptBlocks = extractUserPromptBlocks(context.messages);
 	let promptText = extractUserPrompt(context.messages) ?? "";
 
@@ -2118,7 +2154,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				// The killed subprocess may flush a late record into this session's
 				// JSONL — its own mirror's next sync must rebuild and rotate.
 				const state = sessionStateFor(queryCtx.piSessionId);
-				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
+				if (state && ownsMirror(queryCtx, queryMirror)) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
 				debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
 				if (queryCtx.turnOutput) {
 					queryCtx.turnOutput.stopReason = "aborted";
@@ -2142,7 +2178,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 					debug(`provider: query done, deleted ephemeral session ${capturedSessionId.slice(0, 8)} to preserve shared session`);
 				}
 				debug(`provider: query done, ignoring captured session ${capturedSessionId?.slice(0, 8) ?? "none"} to preserve shared session`);
-			} else {
+			} else if (ownsMirror(queryCtx, queryMirror)) {
 				const state = sessionStateFor(queryCtx.piSessionId);
 				const sessionId = capturedSessionId ?? state?.sessionId;
 				if (sessionId) {
@@ -2150,7 +2186,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 					debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
 					// A missed steer may precede the first mirror or arrive while this
 					// query is still able to complete. Preserve both rebuild signals.
-					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild, priorDigests: mirrorDigests(state, queryCtx, context.messages) });
+					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild, priorDigests: queryMirror.digests });
 				}
 			}
 
@@ -2168,8 +2204,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			}
 			if ((wasAborted || options?.signal?.aborted)) {
 				const state = sessionStateFor(queryCtx.piSessionId);
-				if (state) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
-			} else {
+				if (state && ownsMirror(queryCtx, queryMirror)) setSessionStateFor(queryCtx.piSessionId, { ...state, needsRebuild: true, forceRotate: true });
+			} else if (ownsMirror(queryCtx, queryMirror)) {
 				// Drop this session's mirror: its conversation is in an unknown
 				// state after the error. Other sessions' mirrors stay — one
 				// session's failure says nothing about another's conversation.
@@ -2454,6 +2490,7 @@ export default function (pi: ExtensionAPI) {
 		// and /reload do), so there is no per-entry removal to do here — the
 		// top-level transition takes every mirror with it.
 		sharedSessions.clear();
+		mirrorOwners.clear();
 		historyRewrittenBySession.clear();
 
 		// Clear the global streamSimple if this instance registered it.
