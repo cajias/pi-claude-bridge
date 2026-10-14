@@ -30,6 +30,11 @@ const SECTION_RANK = new Map<string, number>([
 	["project_context", 5], ["skills", 6], ["cwd", 7],
 ]);
 
+/** Shared classification for replay projection: #153 customs follow the built-ins. */
+export function isBuiltInPromptSection(name: string): boolean {
+	return SECTION_RANK.has(name);
+}
+
 /**
  * The map's entries, stably sorted by canonical rank. A name absent from the rank table is
  * a custom section, which pi's builder renders after every built-in, so it sorts last here
@@ -53,15 +58,32 @@ function stableRanked(sections: Map<string, string>, ranks: Map<string, number>)
 	return new Map(ranked.map(({ name, value }) => [name, value]));
 }
 
-/** Render replayed system state in the same section order as pi's prompt builder. */
-function canonicalSystemPrompt(message: SystemMessage | undefined): string | undefined {
-	if (!message) return undefined;
+/** The replayed sections in the same order as pi's prompt builder renders them. */
+function canonicalSections(message: SystemMessage): [string, string][] {
 	const sections = new Map<string, string>(
 		Object.entries(message.sections ?? {}).filter((entry): entry is [string, string] => entry[1] !== null),
 	);
-	const parts = [contentText(message.content), ...stableRanked(sections, SECTION_RANK).values()]
+	return [...stableRanked(sections, SECTION_RANK)];
+}
+
+/** Render replayed system state in the same section order as pi's prompt builder. */
+function canonicalSystemPrompt(message: SystemMessage | undefined): string | undefined {
+	if (!message) return undefined;
+	const parts = [contentText(message.content), ...canonicalSections(message).map(([, value]) => value)]
 		.filter((part) => part.length > 0);
 	return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+/**
+ * The structured sections behind the prompt pi's transcript replays, in render order.
+ * Undefined when the head is opaque text (a forced prompt, a compaction checkpoint):
+ * there is nothing structured to read the portable parts from.
+ */
+export function replayedSections(messages: Context["messages"]): [string, string][] | undefined {
+	const message = getCurrentSystemMessage(messages);
+	if (!message || contentText(message.content).length > 0) return undefined;
+	const sections = canonicalSections(message).filter(([, value]) => value.length > 0);
+	return sections.length > 0 ? sections : undefined;
 }
 
 /**

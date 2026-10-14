@@ -1,7 +1,8 @@
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { formatProjectContext } from "./agents-md.js";
 import { debugLogPath } from "./log-paths.js";
-import { renderSkillsBlock, type SkillReadTool } from "./skills.js";
+import { renderSkillsBlock, rewriteSkillsBlock, type SkillReadTool } from "./skills.js";
+import { isBuiltInPromptSection } from "./transcript.js";
 
 // What pi assembled for one agent, kept so the bridge can append only the
 // portable parts after Claude Code's own preset.
@@ -15,6 +16,10 @@ export type PromptCaptureInput = {
 	 *  section name. pi renders each one as `<name>\ncontent\n</name>` after the built-in
 	 *  sections; the projection does the same. */
 	sections?: Record<string, string>;
+	/** Portable blocks read straight from the transcript's replayed sections instead of
+	 *  rebuilt from pi's options: set only by recordFromReplay, which never sees the
+	 *  options. Forwarded exactly as pi rendered them. */
+	rendered?: { context?: string; skills?: string; sections?: readonly (readonly [string, string])[] };
 };
 
 type InheritedPrompt = {
@@ -94,6 +99,9 @@ export class PromptCaptures {
 		// Copied, not referenced: the caller's systemPromptOptions is a live object that
 		// later before_agent_start handlers mutate.
 		capture.sections = { ...input.sections };
+		// Assigned even when absent: a key recorded from pi's options replaces the
+		// replay-derived blocks a same-keyed capture carried until now.
+		capture.rendered = input.rendered && { ...input.rendered, sections: input.rendered.sections?.map(([name, text]) => [name, text]) };
 		capture.source = source;
 		if (!existing || customChanged) {
 			capture.inherited = this.findInheritedPrompts(systemPrompt, input.custom);
@@ -102,6 +110,46 @@ export class PromptCaptures {
 		// Mutate an existing node in place so descendants retain a live reference,
 		// then re-insert its key so Map order tracks recency.
 		this.touch(systemPrompt, capture);
+	}
+
+	/**
+	 * Record the prompt pi's transcript replays for a query no capture boundary saw.
+	 *
+	 * The portable parts come from the very sections the provider was sent, so they are
+	 * correct for this key by construction. That is what separates this from the
+	 * tolerance `resolveOrDerive` refuses: nothing is guessed from a near miss.
+	 *
+	 * Only for pi's own default prompt, which is the one shape that renders a `tools`
+	 * section. A custom or sub-agent override (`customPrompt`) becomes the preamble and
+	 * renders no tools, rules or docs sections, yet its text embeds the parent's prompt
+	 * and so also starts with pi's preamble: recording it here would keep the parent's
+	 * parts, drop the child's own wrapper text and skip the inheritance route that
+	 * accounts for it. Those prompts, and opaque ones, stay with the resolver, which
+	 * keeps throwing for what it cannot account for.
+	 *
+	 * Never overwrites a key already known: its options are exact, and a recorded or
+	 * revived key outranks a replay. A later recording from pi's options replaces this one.
+	 */
+	recordFromReplay(systemPrompt: string, sections: readonly (readonly [string, string])[]): boolean {
+		if (this.captures.has(systemPrompt)) return false;
+		if (this.reachableCaptures().some((node) => node.assembledPrompt === systemPrompt)) return false;
+		// The sections must be exactly what the key was rendered from.
+		if (sections.map(([, text]) => text).join("\n\n") !== systemPrompt) return false;
+		const byName = new Map(sections);
+		if (!byName.get("preamble")?.startsWith(PI_PREAMBLE) || !byName.has("tools")) return false;
+		const addendum = byName.get("addendum");
+		this.record(systemPrompt, {
+			append: addendum && unwrapSection("addendum", addendum),
+			contextFiles: [],
+			skills: [],
+			rendered: {
+				context: replayedContext(byName.get("project_context")), skills: replayedSkills(byName.get("skills")),
+				// #153: unknown sections are legitimate custom sections. Preserve their full
+				// replayed bytes and order, without guessing at or stripping their wrappers.
+				sections: sections.filter(([name]) => !isBuiltInPromptSection(name)),
+			},
+		}, "replay");
+		return true;
 	}
 
 	/** Exact lookup only. Callers serving a query want `resolveOrDerive`. */
@@ -145,7 +193,7 @@ export class PromptCaptures {
 	 * silently discarding policy the user wrote down. A failed turn is recoverable;
 	 * a turn that quietly ignored its instructions is not.
 	 */
-	resolveOrDerive(systemPrompt?: string): PromptCapture | undefined {
+	resolveOrDerive(systemPrompt?: string, replaySections?: readonly (readonly [string, string])[]): PromptCapture | undefined {
 		if (!systemPrompt) return undefined;
 		const exact = this.captures.get(systemPrompt);
 		if (exact) {
@@ -163,6 +211,14 @@ export class PromptCaptures {
 			return revived;
 		}
 
+		// A turn pi started without before_agent_start (an extension's triggerTurn message
+		// on an idle session) renders the transcript's *stored* sections, which no capture
+		// boundary recorded. Those sections say what to forward, so record the replay itself.
+		// Guarded to pi's own default prompt: see recordFromReplay.
+		if (replaySections && this.recordFromReplay(systemPrompt, replaySections)) {
+			return this.captures.get(systemPrompt);
+		}
+
 		// Inheritance must be tried before any tolerance/adoption route. A sub-agent
 		// child that embeds its parent's prompt verbatim contains every portable part
 		// of the parent's capture, so an "adopt the capture whose portable parts all
@@ -174,7 +230,6 @@ export class PromptCaptures {
 		const embedded = this.findInheritedPrompts(systemPrompt, systemPrompt);
 		if (embedded.length === 0) {
 			const matches = this.closestKnown(systemPrompt);
-			this.onDiagnose({ systemPrompt, matches });
 			// The query is a recorded key minus its tail. That shape is the signature of
 			// pi#5581: an extension-triggered idle turn (sendMessage with triggerTurn) skips
 			// before_agent_start, so the prompt renders without that turn's extension
@@ -182,6 +237,14 @@ export class PromptCaptures {
 			const truncated = matches.find(
 				(m) => m.firstDivergent === systemPrompt.length && m.key.length > systemPrompt.length,
 			);
+			// Last resort before failing: a standalone auxiliary agent's own whole prompt. Never for
+			// a prompt the store can already account for as a recorded agent's: its key minus the tail
+			// an extension added, or a preamble embedding a recorded agent's custom text (#88).
+			const auxiliary = !truncated && replaySections
+				? deriveAuxiliary(systemPrompt, replaySections, this.reachableCaptures().flatMap((c) => (c.custom?.trim() ? [c.custom] : [])))
+				: undefined;
+			if (auxiliary) return auxiliary;
+			this.onDiagnose({ systemPrompt, matches });
 			if (truncated) {
 				throw new Error(
 					`prompt-capture: this ${systemPrompt.length}-char prompt is the ${truncated.key.length}-char capture recorded at `
@@ -291,7 +354,51 @@ const SHARED_CAPTURES_KEY = Symbol.for("claude-bridge:promptCaptures");
  *  keys carry identical portable parts, so cross-session reuse is safe. */
 export function sharedPromptCaptures(onDiagnose?: (diagnostic: PromptCaptureDiagnostic) => void): PromptCaptures {
 	const globals = globalThis as Record<symbol, PromptCaptures | undefined>;
-	return (globals[SHARED_CAPTURES_KEY] ??= new PromptCaptures(256, onDiagnose));
+	const existing = globals[SHARED_CAPTURES_KEY];
+	if (!existing) return (globals[SHARED_CAPTURES_KEY] = new PromptCaptures(256, onDiagnose));
+	// The store outlives a /reload: it holds every key the session has recorded, and the
+	// extension's new module instance finds the previous instance's object here. One
+	// created by an older bridge lacks methods this version calls, and the recorded
+	// keys cannot be rebuilt (they came from before_agent_start events that already
+	// fired). Adopt it in place instead: its data fields are the ones this class reads,
+	// so it keeps every key and gains the current methods.
+	if (typeof existing.recordFromReplay !== "function") Object.setPrototypeOf(existing, PromptCaptures.prototype);
+	return existing;
+}
+
+/** A `<cwd>` section as pi renders one: the bare absolute path in its wrapper, on one line.
+ *  This section is dropped from what Claude Code receives (its own cwd applies), so anything
+ *  else riding in it would be lost without a trace; a path is the only content accepted. */
+const CWD_SECTION = /^<cwd>\n(?:\/|[A-Za-z]:\/)[^\n\r<>]*\n<\/cwd>$/;
+
+/**
+ * The capture for a standalone auxiliary agent: pi 1.1.0 renders its own whole custom prompt as
+ * `preamble` and nothing but `<cwd>` after it (a completion auditor, for one). No capture boundary
+ * sees such a session and nothing embeds a known prompt, so there is nothing to look up.
+ *
+ * What makes it safe to serve is that the shape carries no portable part to lose: the sections are
+ * exactly [preamble, cwd], they join to the whole prompt, and the preamble is forwarded verbatim,
+ * so every instruction the agent has reaches Claude Code. Anything with a context, skills,
+ * addendum, tools or custom section, an opaque head, or pi's own preamble (anywhere at a line
+ * start) keeps failing, as does one the store already accounts for as a recorded agent's (see
+ * resolveOrDerive): a recorded key minus its tail, or a preamble embedding a recorded custom prompt. The shape is not authenticated provenance — it only proves nothing is
+ * dropped — so a prompt embedding another agent's text is still forwarded as that text and any
+ * pi harness it carries is refused by assertSendablePrompt at projection.
+ *
+ * The result is request-local: it is never recorded, so it cannot shadow a key, be evicted, or
+ * become a parent that a later prompt inherits from. If pi ever exposes real provenance for
+ * auxiliary agents, that should replace this inference.
+ */
+function deriveAuxiliary(systemPrompt: string, sections: readonly (readonly [string, string])[], recordedCustoms: readonly string[]): PromptCapture | undefined {
+	if (sections.map(([, text]) => text).join("\n\n") !== systemPrompt) return undefined;
+	if (sections.length !== 2) return undefined;
+	if (sections[0][0] !== "preamble" || sections[1][0] !== "cwd") return undefined;
+	const [preamble, cwd] = [sections[0][1], sections[1][1]];
+	if (preamble.trim() === "") return undefined;
+	if (preambleAtLineStart(preamble) !== -1) return undefined;
+	if (recordedCustoms.some((custom) => preamble.includes(custom))) return undefined;
+	if (!CWD_SECTION.test(cwd)) return undefined;
+	return { assembledPrompt: systemPrompt, custom: preamble, contextFiles: [], skills: [], inherited: [], source: "auxiliary" };
 }
 
 export function projectPromptCapture(
@@ -348,23 +455,55 @@ function projectCapture(
 
 		const custom = projectCustom(capture, options, visiting);
 		const parts: PromptPart[] = [];
-		const context = formatProjectContext(capture.contextFiles);
+		const context = capture.rendered ? capture.rendered.context : formatProjectContext(capture.contextFiles);
 		if (context) parts.push({ label: "the project context block", text: context });
-		const skills = renderSkillsBlock(ownSkills, options.skillReadTool);
+		const skills = capture.rendered
+			? renderReplayedSkills(capture.rendered.skills, options.skillReadTool)
+			: renderSkillsBlock(ownSkills, options.skillReadTool);
 		if (skills) parts.push({ label: "the skills block", text: skills });
 		if (custom) parts.push({ label: "the custom prompt", text: custom });
 		if (capture.append) parts.push({ label: "the appended instructions", text: capture.append });
 		// pi's builder renders custom sections last, after `cwd` — the one built-in section
 		// with nothing portable to forward — so they follow the append here.
-		for (const [name, content] of Object.entries(capture.sections ?? {})) {
-			if (!content) continue;
-			parts.push({ label: `the ${name} section`, text: `<${name}>\n${content}\n</${name}>` });
+		const customSections = capture.rendered?.sections
+			?? Object.entries(capture.sections ?? {}).filter(([, content]) => content).map(([name, content]) => [name, `<${name}>\n${content}\n</${name}>`] as const);
+		for (const [name, text] of customSections) {
+			parts.push({ label: `the ${name} section`, text });
 		}
 		assertSendablePrompt(parts, capture);
 		return parts.length > 0 ? parts.map((part) => part.text).join("\n\n") : undefined;
 	} finally {
 		visiting.delete(capture);
 	}
+}
+
+/** pi's `<project_context>` section as `formatProjectContext` lays the same files out, so a replay
+ *  turn sends the bytes a normal turn does (and shares its cached prefix). Both are
+ *  `Project-specific instructions and guidelines:` plus the files; they differ only in the blank
+ *  lines inside the tags: pi `<t>\nBODY\n</t>`, the bridge `<t>\n\nBODY\n\n</t>`. A section not
+ *  wrapped that way is forwarded as pi rendered it. */
+function replayedContext(section: string | undefined): string | undefined {
+	if (!section) return undefined;
+	const body = unwrapSection("project_context", section);
+	return body === section ? section : `<project_context>\n\n${body}\n\n</project_context>`;
+}
+
+/** pi's `<skills>` section without its wrapper: `renderSkillsBlock` sends the bare, trimmed block. */
+function replayedSkills(section: string | undefined): string | undefined {
+	return section && unwrapSection("skills", section);
+}
+
+/** A replayed skills section, as `renderSkillsBlock` would present it for the same reader. */
+function renderReplayedSkills(section: string | undefined, readTool: SkillReadTool): string | undefined {
+	if (!section || readTool === "none") return undefined;
+	return readTool === "mcp" ? rewriteSkillsBlock(section) : section;
+}
+
+/** The content pi wrapped in `<name>\n…\n</name>`, or the text unchanged if it is not. */
+function unwrapSection(name: string, text: string): string {
+	const open = `<${name}>\n`;
+	const close = `\n</${name}>`;
+	return text.startsWith(open) && text.endsWith(close) ? text.slice(open.length, text.length - close.length) : text;
 }
 
 function assertSendablePrompt(parts: readonly PromptPart[], capture: PromptCapture): void {

@@ -26,7 +26,8 @@ import { collectCarriedAttachments, placeCarriedAttachments, type CarriedAttachm
 import { createToolServer } from "./mcp-server.js";
 import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
 import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
-import { nonSystemMessages, toBridgeContext } from "./transcript.js";
+import { nonSystemMessages, replayedSections, toBridgeContext } from "./transcript.js";
+import { extendDigests, priorDigests, startsWithDigests } from "./priors-fingerprint.js";
 import { updateUsage, type SdkUsage } from "./usage.js";
 
 // --- Debug logging ---
@@ -200,6 +201,12 @@ interface SessionState {
 	// with no query in flight does NOT set this — there's no concurrent CC writer
 	// then, so in-place rebuild (preserve UUID, deleteSession + createSession) is safe.
 	forceRotate?: boolean;
+	// Content digests (priors-fingerprint.ts) of the pi messages this mirror holds, in order:
+	// what it was built or last resumed from, extended as the cursor advances. A count alone
+	// cannot tell a continuation from a history pi rewrote since — a redaction keeps the
+	// length, a context-compressing extension changes it. Unset for the unattributed "(none)"
+	// bucket, whose callers cannot be told apart, which keeps the count-only behavior.
+	priorDigests?: string[];
 }
 
 /**
@@ -751,9 +758,28 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// every read and write below addresses sessionStateFor(piSessionId), so a
 	// foreign session's shape-matching context can never REUSE or rebuild another
 	// session's CC file.
-	const sharedSession = sessionStateFor(piSessionId);
+	let sharedSession = sessionStateFor(piSessionId);
 	const history = nonSystemMessages(messages);
 	const priorMessages = history.slice(0, turnStart(history)); // everything before the current user turn
+	const digests = piSessionId ? priorDigests(priorMessages) : undefined;
+
+	// The mirror is only as good as the history it holds. If pi's priors no longer begin with
+	// the messages it was recorded over — rewritten at the same length, or compressed shorter
+	// (ACP's `compress` is not a pi compaction, so no session_compact marks it) — resuming
+	// would feed Claude Code a conversation pi no longer has: in the field a 1.2M-token mirror
+	// against a 60K-token view. Rebuild from what pi has now. A query still running on this
+	// mirror may be writing to it, so that case rotates to a fresh file instead of rewriting
+	// in place, as an abort does.
+	if (digests && sharedSession?.priorDigests && !sharedSession.needsRebuild && !startsWithDigests(digests, sharedSession.priorDigests)) {
+		const writerActive = [...activeQueryContexts].some((c) => c.piSessionId === piSessionId);
+		diagDump("mirror_stale", { sessionId: sharedSession.sessionId, recorded: sharedSession.priorDigests.length, priors: priorMessages.length, cursor: sharedSession.cursor, writerActive });
+		debug(`Case 4 stale mirror: pi's history no longer matches what session ${sharedSession.sessionId.slice(0, 8)} holds (${sharedSession.priorDigests.length} recorded, ${priorMessages.length} now) → rebuild`);
+		sharedSession = { ...sharedSession, needsRebuild: true, ...(writerActive ? { forceRotate: true } : {}) };
+		// Persisted now, not only used locally: an empty history returns below without saving
+		// anything, and the query's completion would then pair this mirror's old cursor and
+		// digests with whatever session that query created.
+		setSessionStateFor(piSessionId, sharedSession);
+	}
 
 	// REUSE path
 	//
@@ -767,8 +793,8 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 		const trailingAssistantOnly =
 			missed.length === 1 && (missed[0] as { role?: string }).role === "assistant";
 		if (missed.length === 0 || trailingAssistantOnly) {
+		setSessionStateFor(piSessionId, { ...sharedSession, ...(trailingAssistantOnly ? { cursor: priorMessages.length } : {}), cwd, priorDigests: digests });
 		if (trailingAssistantOnly) {
-			setSessionStateFor(piSessionId, { ...sharedSession, cursor: priorMessages.length, cwd });
 			debug(`Case 3: advanced cursor past trailing assistant, resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${priorMessages.length}`);
 		} else {
 			debug(`Case 3: resuming session ${sharedSession.sessionId.slice(0, 8)}, cursor=${sharedSession.cursor}`);
@@ -829,7 +855,7 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	// records, not messages: `messages` filters out the attachment records that
 	// carrying an `@file` expansion across a rebuild writes into the same file.
 	verifyWrittenSession(session.jsonlPath, session.sessionId, session.records.length, cwd);
-	setSessionStateFor(piSessionId, { sessionId: session.sessionId, cursor: priorMessages.length, cwd, piSessionId: piSessionId ?? undefined });
+	setSessionStateFor(piSessionId, { sessionId: session.sessionId, cursor: priorMessages.length, cwd, piSessionId: piSessionId ?? undefined, priorDigests: digests });
 	if (previousSessionId === undefined) {
 		debug(`Case 2: first turn with ${priorMessages.length} prior messages → session ${session.sessionId.slice(0, 8)}, ${session.records.length} records`);
 	} else if (preserveId) {
@@ -841,6 +867,24 @@ function debugSessionPaths(label: string, cwd: string, jsonlPath: string): void 
 	debugSessionPaths(`${session.sessionId.slice(0, 8)}`, cwd, session.jsonlPath);
 	debug(`syncResult: path=rebuild sessionId=${session.sessionId} priors=${priorMessages.length} ${previousSessionId === undefined ? "first" : preserveId ? "preserved" : "rotated-post-abort"}`);
 	return { sessionId: session.sessionId };
+}
+
+/** What the mirror holds once a query on it completes: its recorded digests extended over the
+ *  messages the query saw. A mirror this query created has no record yet, so it starts one;
+ *  only the attributed sessions keep digests (see SessionState.priorDigests). */
+function mirrorDigests(state: SessionState | null, c: QueryContext, initial: Context["messages"]): string[] | undefined {
+	const seen = stableMessages(c.latestMessages.length > initial.length ? c.latestMessages : initial);
+	if (state) return extendDigests(state.priorDigests, seen);
+	return c.piSessionId ? priorDigests(seen) : undefined;
+}
+
+/** The part of a call's context that is settled history: everything before its trailing run of
+ *  user messages. That run is what Claude Code receives as the prompt, and it is where extensions
+ *  put per-call context (ACP nudges, herdsman's retired-context notice) that pi never stores, so
+ *  the next call will not have it. A real steer is recorded on the first call where it is no
+ *  longer trailing. The cursor keeps counting the full context, as it always has. */
+function stableMessages<T extends { role: string }>(messages: readonly T[]): T[] {
+	return messages.slice(0, turnStart(messages as unknown as Context["messages"]));
 }
 
 // The SDK's query(), or a test double (see setQuery). The compact/summary
@@ -1722,6 +1766,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// pi hands providers a transcript (prompt/tools folded into system messages) — fold it
 	// back out to the prompt/tools fields every cursor write, syncSharedSession call and
 	// prompt-capture lookup below assumes (issue #106).
+	const replay = replayedSections(context.messages);
 	context = toBridgeContext(context);
 
 	// One-off summarizer calls arrive HERE too, not only via isolatedStreamFn: /bug report
@@ -1788,8 +1833,15 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// delivering its own results would drag it to that subagent's message count
 		// — observed pulling a parent from 5 back to 3, which cost the parent's next
 		// turn a full rebuild and a flushed prompt cache.
+		// A history-less query (preservesMirror) never writes to the mirror, so its shorter
+		// message count says nothing about it: lowering the cursor here is how a compressed
+		// 46-message view resumed a 3,000-message mirror one turn later.
 		const state = sessionStateFor(resultCtx.piSessionId);
-		if (state) state.cursor = context.messages.length;
+		if (state && !resultCtx.preservesMirror) {
+			state.cursor = context.messages.length;
+			state.priorDigests = extendDigests(state.priorDigests, stableMessages(context.messages));
+		}
+		if (context.messages.length > resultCtx.latestCursor) resultCtx.latestMessages = context.messages;
 		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, context.messages.length);
 		return stream;
 	}
@@ -1844,7 +1896,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	let promptCapture: PromptCapture | undefined;
 	let systemPromptAppend: string | undefined;
 	try {
-		promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt);
+		promptCapture = promptCaptures.resolveOrDerive(context.systemPrompt, replay);
 		systemPromptAppend = promptCapture
 			? projectPromptCapture(promptCapture, {
 				skillReadTool: mcpTools.some((tool) => tool.name === "read") ? "mcp" : "none",
@@ -1881,6 +1933,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	queryCtx.turnToolCallIds = [];
 	queryCtx.resetTurnState(model);
 	queryCtx.latestCursor = 0;
+	queryCtx.latestMessages = [];
 	// The served pi session, for rewrite attribution on delivery (issue #101
 	// follow-up) and on SessionState. A fresh instance of this module inside a
 	// worktree-spawned subagent has its own contexts; each records its own.
@@ -1903,6 +1956,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// armed rewrite — a sibling pi session's stays armed for its own queries.
 	if (piSessionId) historyRewrittenBySession.delete(piSessionId);
 	const { sessionId: resumeSessionId } = syncResult;
+	queryCtx.preservesMirror = Boolean(syncResult.preserveSharedSession);
 	const promptBlocks = extractUserPromptBlocks(context.messages);
 	let promptText = extractUserPrompt(context.messages) ?? "";
 
@@ -2096,7 +2150,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 					debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
 					// A missed steer may precede the first mirror or arrive while this
 					// query is still able to complete. Preserve both rebuild signals.
-					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild });
+					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild, priorDigests: mirrorDigests(state, queryCtx, context.messages) });
 				}
 			}
 
@@ -2435,14 +2489,18 @@ export default function (pi: ExtensionAPI) {
 		sections?: Record<string, string>;
 		selectedTools?: string[];
 	} | undefined) {
-		if (!systemPrompt) return;
-		const hasRead = !options?.selectedTools || options.selectedTools.includes("read");
+		// No options yet means no before_agent_start has run in this runtime (a resumed
+		// process whose first turn an extension triggered). A key recorded now would carry
+		// no context files or skills, and an exact hit on it would forward none — silently.
+		// The transcript replay supplies them at the stream call instead.
+		if (!systemPrompt || !options) return;
+		const hasRead = !options.selectedTools || options.selectedTools.includes("read");
 		promptCaptures.record(systemPrompt, {
-			custom: options?.customPrompt,
-			append: options?.appendSystemPrompt,
-			contextFiles: options?.contextFiles ?? [],
-			skills: hasRead ? options?.skills ?? [] : [],
-			sections: options?.sections,
+			custom: options.customPrompt,
+			append: options.appendSystemPrompt,
+			contextFiles: options.contextFiles ?? [],
+			skills: hasRead ? options.skills ?? [] : [],
+			sections: options.sections,
 		}, source);
 	}
 	pi.on("before_agent_start", (event) => {

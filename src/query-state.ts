@@ -20,6 +20,9 @@ export class QueryContext {
 	activeQuery: unknown | null = null;
 	currentPiStream: AssistantMessageEventStream | null = null;
 	latestCursor = 0;
+	/** The pi messages behind `latestCursor`, so completion can record what the mirror
+	 *  holds even when it was created by this very query (no state to extend yet). */
+	latestMessages: ReadonlyArray<{ role: string }> = [];
 	pendingToolCalls = new Map<string, PendingToolCall>();
 	pendingResults = new Map<string, McpResult>();
 	/** tool_use ids emitted this turn. Sole purpose is routing a delivered result
@@ -48,6 +51,13 @@ export class QueryContext {
 	 *  the way a module flag does.
 	 */
 	historyStale = false;
+	/** The history this query started from was shorter than its session's mirror, so it
+	 *  runs history-less (syncSharedSession's clean start) and never writes to the
+	 *  mirror. Every later provider call on this query — each tool result — must leave
+	 *  the mirror's cursor alone too: lowering it to this query's shorter history makes
+	 *  the next turn look like a continuation of a mirror that holds far more than pi's
+	 *  current view. */
+	preservesMirror = false;
 	/** A steer never reached CC. A first query has no session mirror yet, so
 	 *  completion must carry this into the mirror it creates. */
 	missedSteer = false;

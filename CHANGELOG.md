@@ -1,5 +1,11 @@
 # Changelog
 
+## UNRELEASED
+
+- **Fix: structured idle-turn replay and standalone auditor capture** — recover pi#5581 replay while preserving #153 custom sections and inheritance/sendability guards; auxiliary prompts remain request-local and verbatim. Skip optionless captures and adopt shared stores across reload.
+- **Fix: stale mirror resume after history rewrites** — fingerprint settled history, preserve cursors for history-less queries, and immediately persist stale state. Per-call trailing users are not fingerprinted; legitimate rewrites rebuild.
+- **Tests: offline replay and query-isolation regressions** — sanitized synthetic fixtures, exact baseline failure pins, disposable mutations and stability checks with SDK/network traps.
+
 ## 0.9.2 — 2026-10-07
 
 - **Fix: synthetic failure notices no longer stream as assistant output (#162)** — keeps pre-output failover working for consumers like pi-model-fallback-alias; the notice text stays on the failed turn's error event. A notice following a stalled stream also drops the dead stream's abandoned partial blocks.
