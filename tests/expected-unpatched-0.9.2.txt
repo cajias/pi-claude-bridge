@@ -1,0 +1,89 @@
+BR-AUX-1: an auxiliary query beside a parked parent
+BR-AUX-1: classifier-level rejections the transcript cannot produce
+BR-AUX-1: older routes keep precedence
+BR-AUX-1: prompts the store already accounts for as a recorded agent's keep failing closed
+BR-AUX-1: shapes that must still fail, before any query
+BR-AUX-1: the reconstructed canary prompt (297) and a length-only 330 stand-in
+QueryContext.preservesMirror
+a goal-x reset (state block changed) rewrites the retained tails: exactly one rebuild, then stable
+a history compressed under a running query rebuilds the mirror from the compressed history
+a history-less side call on a session whose mirror holds history
+a mirror created by its first query is recorded too, tool results included
+a real steer is tracked once it is no longer trailing, and a later rewrite of it rebuilds
+adopts the previous bridge's store: same object, recorded keys kept, current methods present
+an ACP tag appearing on a settled tool result: exactly one rebuild
+an ACP tag appearing on a settled tool result: exactly one rebuild
+an accepted auxiliary prompt does not call the diagnostic callback or touch the store
+an attributed mirror whose recorded digests are a prefix of the shrunken view: the cursor still holds
+an auxiliary query that is already cancelled when it starts cannot disturb the parent
+aux297: resolves, forwards the preamble verbatim and nothing else, and leaves the store alone
+canary replay (control without an auditor)
+canary replay (standalone auditor inside each completion request)
+canary replay: the fit is not unique, and the tests say which assumption they rest on
+cancel before the auxiliary query reaches a tool: the turn is aborted, the parent undisturbed
+cancel while the auxiliary query is parked on its tool: only its own handlers are released
+context files \#0 with 0 skill(s): replay forwards exactly what the options path does
+context files \#0 with 1 skill(s): replay forwards exactly what the options path does
+context files \#0 with 2 skill(s): replay forwards exactly what the options path does
+context files \#1 with 0 skill(s): replay forwards exactly what the options path does
+context files \#1 with 1 skill(s): replay forwards exactly what the options path does
+context files \#1 with 2 skill(s): replay forwards exactly what the options path does
+context files \#2 with 0 skill(s): replay forwards exactly what the options path does
+context files \#2 with 1 skill(s): replay forwards exactly what the options path does
+context files \#2 with 2 skill(s): replay forwards exactly what the options path does
+custom replay bytes are not unwrapped or normalized
+docs/sendability: the subscription-gate phrase pair in the preamble
+error before any tool call, at start-up
+error: the auxiliary query fails mid-loop; the parent's pending call and mirror are untouched
+extension — the replay carries an extension section no forced prompt had; the recorded key is untouched
+forwards a replayed append (addendum) exactly, without pi's wrapper tags
+goal worker round trip (control without an auditor)
+goal worker round trip (with the auditor in flight)
+goal-x checkpoint turn with a stale agent_browser section (Extension)
+goal-x resets its retained tails mid-query: exactly one mirror_stale, with the canary's numbers, rebuilt in place
+goal-x resets its retained tails mid-query: exactly one mirror_stale, with the canary's numbers, rebuilt in place
+honours a read-less loadout: no skills are forwarded
+is set for a history-less query (unattributed mirror: count-only) and cleared for one that runs on the mirror
+lead — restart + idle assignment turn: stale tool list in the replay, restarted live render recorded
+length-330 stand-in: resolves, forwards the preamble verbatim and nothing else, and leaves the store alone
+loadout — tool loadout drifted since the transcript's sections were written
+mid-query retained-tail reset: exactly one rebuild, in place, then stable
+mid-query retained-tail reset: exactly one rebuild, in place, then stable
+mirror digests through real turns
+neighbouring tail patterns (counters also moving at the steer call or at checkpoint 3) give the same diag line
+no future inheritance: a later prompt embedding an earlier auxiliary prompt is not accounted for by it
+no rewrite: zero rebuilds, the same mirror resumed, the checkpoint steer in the mirror's next turn
+overlapping text: an auxiliary prompt quoting part of a known prompt neither inherits nor contaminates
+per-call user context that pi never stores (ACP nudges, herdsman's retired-context notice)
+persists the stale mark when the history is empty
+re-recording the replay keeps one key, however many turns resolve through it
+rebuilds from the compressed priors instead of resuming the oversized mirror
+rebuilds when a tool result is rewritten at the same length (redaction)
+rebuilds when an image changes at the same length
+rebuilds when tool-call arguments change at the same length
+recordFromReplay
+refuses sections that are not what the key was rendered from
+replay and options paths forward custom sections identically in order
+replay capture: the three field failure shapes
+replay capture: what must keep resolving the old way
+replay custom sections coexist with \#153
+replayed context is byte-identical to a normal turn's
+replayed context still passes the sendability guard
+resolves by replay: forwards project_context + skills, and the \#153 agent_browser section
+rotates to a fresh file when a query is still running on the stale mirror
+serves a replay turn from the adopted store without a TypeError
+shared capture store across a /reload
+success: the auxiliary tool loop stays query-local; the parent resumes exactly once afterwards
+syncSharedSession mirror digests
+the accepted classification leaves the store and diagnostics alone
+the compress incident: a history-less query must not lower the mirror's cursor
+the default-prompt replay route (tools section) still records its replay
+the guards are specific: an unrecorded standalone agent still resolves beside a recorded custom agent
+the same preamble under different cwds resolves each time to identical instructions
+the store stays unchanged through repeated and interleaved auxiliary turns
+two auxiliary agents at once (an auditor and an oracle) stay apart from each other and the parent
+two consecutive checkpoint calls: tails reach Claude Code, history intact, one mirror, no mirror_stale
+unattributed callers (the shared "(none)" mirror, no digests): the checkpoint starts clean instead of resuming the stale mirror
+unchanged counters append nothing: the second checkpoint is the only trailing message
+unsafe custom replay sections are refused before SDK acquisition
+whitespace and Unicode in the preamble reach the SDK untouched

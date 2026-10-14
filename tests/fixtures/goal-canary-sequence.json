@@ -1,0 +1,182 @@
+{
+  "source": "Sanitized synthetic checkpoint sequence. Original shape retained; all identifiers and private message text replaced. Request-only tails are modelled, not observed.",
+  "entries": [
+    {
+      "entry": 5,
+      "kind": "custom",
+      "customType": "pi-session-search-primer",
+      "content": "SYNTHETIC_NOTICE_5"
+    },
+    {
+      "entry": 6,
+      "kind": "custom",
+      "customType": "pi-herdsman-supervisor-state",
+      "content": "SYNTHETIC_NOTICE_6"
+    },
+    {
+      "entry": 9,
+      "kind": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "SYNTHETIC_SETUP_REQUEST"
+        }
+      ]
+    },
+    {
+      "entry": 10,
+      "kind": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "SYNTHETIC_REPLY_10"
+        }
+      ]
+    },
+    {
+      "entry": 14,
+      "kind": "custom",
+      "customType": "pi-goal-event",
+      "content": "<pi_goal_continuation goal_id=\"synthetic-goal\" kind=\"checkpoint\" v=\"2\"/>"
+    },
+    {
+      "entry": 15,
+      "kind": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "SYNTHETIC_THINKING"
+        },
+        {
+          "type": "toolCall",
+          "id": "toolu_SYN_READY",
+          "name": "update_goal",
+          "arguments": {
+            "continuation": {
+              "kind": "ready"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "entry": 16,
+      "kind": "toolResult",
+      "toolCallId": "toolu_SYN_READY",
+      "toolName": "update_goal",
+      "content": [
+        {
+          "type": "text",
+          "text": "SYNTHETIC_READY_RESULT"
+        }
+      ],
+      "isError": false
+    },
+    {
+      "entry": 18,
+      "kind": "custom",
+      "customType": "pi-goal-event",
+      "content": "<pi_goal_continuation goal_id=\"synthetic-goal\" kind=\"checkpoint\" v=\"2\"/>"
+    },
+    {
+      "entry": 19,
+      "kind": "assistant",
+      "content": [
+        {
+          "type": "toolCall",
+          "id": "toolu_SYN_COMPLETE1",
+          "name": "update_goal",
+          "arguments": {
+            "status": "complete",
+            "completion_summary": "synthetic completion"
+          }
+        }
+      ]
+    },
+    {
+      "entry": 20,
+      "kind": "toolResult",
+      "toolCallId": "toolu_SYN_COMPLETE1",
+      "toolName": "update_goal",
+      "content": [
+        {
+          "type": "text",
+          "text": "SYNTHETIC_AUDIT_REJECTION"
+        }
+      ],
+      "isError": false
+    },
+    {
+      "entry": 23,
+      "kind": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "SYNTHETIC_THINKING"
+        },
+        {
+          "type": "toolCall",
+          "id": "toolu_SYN_COMPLETE2",
+          "name": "update_goal",
+          "arguments": {
+            "status": "complete",
+            "completion_summary": "synthetic completion"
+          }
+        }
+      ]
+    },
+    {
+      "entry": 24,
+      "kind": "toolResult",
+      "toolCallId": "toolu_SYN_COMPLETE2",
+      "toolName": "update_goal",
+      "content": [
+        {
+          "type": "text",
+          "text": "SYNTHETIC_AUDIT_REJECTION"
+        }
+      ],
+      "isError": false
+    },
+    {
+      "entry": 26,
+      "kind": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "SYNTHETIC_REPLY_26"
+        }
+      ]
+    },
+    {
+      "entry": 27,
+      "kind": "custom",
+      "customType": "pi-goal-audit-event",
+      "content": "SYNTHETIC_NOTICE_27"
+    },
+    {
+      "entry": 28,
+      "kind": "custom",
+      "customType": "pi-goal-audit-event",
+      "content": "SYNTHETIC_NOTICE_28"
+    },
+    {
+      "entry": 29,
+      "kind": "custom",
+      "customType": "pi-goal-audit-event",
+      "content": "SYNTHETIC_NOTICE_29"
+    },
+    {
+      "entry": 30,
+      "kind": "custom",
+      "customType": "pi-goal-audit-event",
+      "content": "SYNTHETIC_NOTICE_30"
+    },
+    {
+      "entry": 32,
+      "kind": "custom",
+      "customType": "pi-goal-event",
+      "content": "<pi_goal_continuation goal_id=\"synthetic-goal\" kind=\"checkpoint\" v=\"2\"/>"
+    }
+  ]
+}
