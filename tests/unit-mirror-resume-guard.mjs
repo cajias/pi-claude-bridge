@@ -58,6 +58,7 @@ const mirrorText = (sessionId) => {
 // --- fake SDK query (same shape as unit-cross-session-turns) ---
 const calls = [];
 const scripts = [];
+let promptDrainGate;
 const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { wait: () => p, open }; };
 const init = (id) => ({ type: "system", subtype: "init", session_id: id });
 const ev = (event) => ({ type: "stream_event", event });
@@ -77,9 +78,15 @@ beforeEach(() => {
 	__test.resetSharedSession();
 	calls.length = 0;
 	scripts.length = 0;
+	promptDrainGate = null;
 	__test.setQuery(({ prompt, options }) => {
 		// Drain the input like the SDK's pump does: a steer's ack resolves only once it is read.
-		void (async () => { for await (const _ of prompt) { /* written to stdin */ } })().catch(() => {});
+		const drainGate = promptDrainGate;
+		void (async () => {
+			for await (const msg of prompt) {
+				if (msg.priority === "next" && drainGate) await drainGate.wait();
+			}
+		})().catch(() => {});
 		const script = scripts.shift();
 		if (!script) throw new Error("no fake script queued");
 		// What the resumed mirror held when this query started.
@@ -304,6 +311,54 @@ describe("syncSharedSession mirror digests", () => {
 });
 
 describe("mirror digests through real turns", () => {
+	it("fences a deferred steer rejection after discard reuses the context for a replacement query", async () => {
+		const sessionId = "pi-deferred-steer";
+		const first = [...conversation(6, "BEFORE_STEER"), user("go")];
+		const oldGate = gate();
+		const drainGate = gate();
+		promptDrainGate = drainGate;
+		scripts.push([init("cc-old-steer"), ...toolUse("toolu_old_steer"), oldGate.wait, done()]);
+		await stream(sessionId, first).result();
+		const originalCtx = ctx();
+		const oldQuery = originalCtx.activeQuery;
+		const displaced = stateOf(sessionId);
+
+		// Keep the helper's promise so the rejection can be awaited exactly, without
+		// a timing sleep. Its real prompt-stream ack remains pending until discard.
+		const delivery = __test.deliverToolResults(originalCtx,
+			[{ toolCallId: "toolu_old_steer", content: [{ type: "text", text: "old result" }] }],
+			[{ type: "text", text: "late steer" }], first.length + 3);
+		__test.markRebuildForSession(sessionId, "session_compact:test");
+		const rewritten = [user("STEER_SUMMARY"), say("noted"), user("go"),
+			call("toolu_old_steer"), result("toolu_old_steer")];
+		const replacementGate = gate();
+		promptDrainGate = null;
+		scripts.push([init("cc-replacement-steer"), replacementGate.wait, done()]);
+		// Discard rejects the ack synchronously, then installs B on the same context
+		// before A's rejection continuation gets its microtask.
+		const replacementStream = stream(sessionId, rewritten);
+		const replacement = structuredClone(stateOf(sessionId));
+		const reused = ctx() === originalCtx && ctx().activeQuery !== oldQuery;
+		await delivery;
+		const afterRejection = {
+			missedSteer: ctx().missedSteer,
+			mirror: structuredClone(stateOf(sessionId)),
+			queuedOldResult: ctx().pendingResults.has("toolu_old_steer"),
+		};
+		oldGate.open();
+		drainGate.open();
+		replacementGate.open();
+		await replacementStream.result();
+		await settle();
+		const afterCompletion = stateOf(sessionId);
+
+		assert.ok(reused, "the replacement reused the originating QueryContext");
+		assert.notEqual(replacement.sessionId, displaced.sessionId, "discard rotated the mirror");
+		assert.deepEqual(afterRejection, { missedSteer: false, mirror: replacement, queuedOldResult: false },
+			"obsolete delivery cannot mutate either replacement bookkeeping or its mirror");
+		assert.equal(Boolean(afterCompletion.needsRebuild), false, "completion does not preserve an obsolete missed-steer signal");
+	});
+
 	it("fences a rotated live writer's delivery, completion, error and abort from the replacement mirror", async () => {
 		for (const ending of ["success", "error", "abort", "abort-error"]) {
 			const sessionId = `pi-displaced-${ending}`;

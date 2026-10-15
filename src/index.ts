@@ -1651,10 +1651,13 @@ function steerBlocks(messages: Context["messages"]): ContentBlockParam[] | null 
 /** A steer that never made it into CC's session. The cursor has already counted
  *  it, so count-based sync would skip it forever — rebuild instead, which
  *  re-imports the message from pi's context. */
-function steerMissedSession(c: QueryContext, text: string): void {
+function steerMissedSession(c: QueryContext, text: string, mirror: QueryMirror | undefined): void {
+	// A discarded query's rejected ack can run after this context has been reused.
+	// Neither the replacement's flag nor its mirror belongs to that delivery.
+	if (queryMirrors.get(c) !== mirror || !ownsMirror(c, mirror)) return;
 	c.missedSteer = true;
 	const state = sessionStateFor(c.piSessionId);
-	if (state && ownsMirror(c)) setSessionStateFor(c.piSessionId, { ...state, needsRebuild: true });
+	if (state) setSessionStateFor(c.piSessionId, { ...state, needsRebuild: true });
 	debug(`provider: steer never reached CC, marked query for rebuild: ${text.slice(0, 60)}`);
 }
 
@@ -1677,11 +1680,12 @@ async function deliverToolResults(
 	steer: ContentBlockParam[] | null,
 	contextLength: number,
 ): Promise<void> {
+	const mirror = queryMirrors.get(c);
 	if (steer) {
 		const text = steer.map((b) => (b.type === "text" ? b.text : "[image]")).join("\n");
 		if (!c.promptStream) {
 			debug(`WARNING: steer with no prompt stream, dropping: ${text.slice(0, 60)}`);
-			steerMissedSession(c, text);
+			steerMissedSession(c, text, mirror);
 		} else {
 			try {
 				await c.promptStream.push(userMessage(steer, "next"));
@@ -1692,11 +1696,14 @@ async function deliverToolResults(
 				// pi's context, and the caller has already advanced the session
 				// cursor past it, so force a rebuild or CC would never see it.
 				debug(`provider: steer push rejected, delivering tool result anyway:`, error);
-				steerMissedSession(c, text);
+				steerMissedSession(c, text, mirror);
 			}
 		}
 	}
 
+	// Discard already settled the old handlers; do not enqueue their results on
+	// the replacement context after an asynchronous steer acknowledgement.
+	if (queryMirrors.get(c) !== mirror) return;
 	debug(`provider: tool results, ${results.length} results, ${c.pendingToolCalls.size} waiting handlers, ctx.msgs=${contextLength}`);
 	for (const result of results) {
 		const id = result.toolCallId;
