@@ -311,6 +311,57 @@ describe("syncSharedSession mirror digests", () => {
 });
 
 describe("mirror digests through real turns", () => {
+	it("a first-query publication retains ownership for a pending steer rejected by teardown", async () => {
+		const sessionId = "pi-first-pending-steer";
+		const first = [user("FIRST_PENDING_A")];
+		const continuation = [...first, call("toolu_first_pending"), result("toolu_first_pending"), user("PENDING_STEER")];
+		const queryGate = gate();
+		const drainGate = gate();
+		promptDrainGate = drainGate;
+		// A CLI failure result still completes consumeQuery normally; teardown is
+		// what rejects the steer that the input pump has not acknowledged.
+		scripts.push([init("cc-first-pending"), ...toolUse("toolu_first_pending"), queryGate.wait,
+			{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["query stopped"] }]);
+		await stream(sessionId, first).result();
+		const originalCtx = ctx();
+		assert.equal(stateOf(sessionId), null, "no mirror exists before first completion");
+		const prompt = originalCtx.promptStream;
+		const push = prompt.push;
+		let steerAck;
+		prompt.push = (message) => {
+			const ack = push(message);
+			if (message.priority === "next") steerAck = ack;
+			return ack;
+		};
+		const fail = prompt.fail;
+		let published;
+		prompt.fail = (error) => {
+			published ??= structuredClone(stateOf(sessionId));
+			fail(error);
+		};
+		const finishing = stream(sessionId, continuation);
+		assert.ok(steerAck, "real delivery has a pending steer acknowledgement");
+		assert.equal(stateOf(sessionId), null, "delivery only records query-local history");
+		queryGate.open();
+		await finishing.result();
+		await assert.rejects(steerAck, /query ended/, "teardown rejects the pending acknowledgement");
+		drainGate.open();
+		await settle();
+		const afterRejection = structuredClone(stateOf(sessionId));
+		const missedSteer = originalCtx.missedSteer;
+		const sameContext = ctx() === originalCtx;
+		await plainTurn(sessionId, [...continuation, say("reply"), user("next")]);
+
+		assert.ok(sameContext, "publication did not replace the query context");
+		assert.equal(published.cursor, 4, "completion published before rejecting the steer");
+		assert.deepEqual(published.priorDigests, priorDigests(continuation.slice(0, 3)));
+		assert.equal(Boolean(published.needsRebuild), false, "the rejection has not run at publication");
+		assert.match(calls.at(-1).mirror ?? "", /PENDING_STEER/,
+			"the next turn rebuilds from history including the missed steer, rather than reusing the empty mirror");
+		assert.equal(missedSteer, true, "the originating delivery retains its ownership");
+		assert.equal(afterRejection.needsRebuild, true, "its newly published mirror is marked stale");
+	});
+
 	it("fences a deferred steer rejection after discard reuses the context for a replacement query", async () => {
 		const sessionId = "pi-deferred-steer";
 		const first = [...conversation(6, "BEFORE_STEER"), user("go")];

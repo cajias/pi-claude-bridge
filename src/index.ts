@@ -271,9 +271,14 @@ function sessionStateFor(piSessionId: string | null | undefined): SessionState |
 }
 
 /** Replace (or plant) the mirror for `piSessionId`. */
-function setSessionStateFor(piSessionId: string | null | undefined, state: SessionState | null): void {
+function setSessionStateFor(piSessionId: string | null | undefined, state: SessionState | null, publisher?: QueryMirror): void {
 	const key = sessionKey(piSessionId);
-	if (state === null || state.sessionId !== sessionStateFor(piSessionId)?.sessionId) mirrorOwners.delete(key);
+	const previous = sessionStateFor(piSessionId);
+	// Only the current owner can plant its first mirror without revoking itself:
+	// teardown may still reject its pending steer. Replacement/deletion still revoke.
+	const firstPublication = state !== null && previous === null && publisher
+		&& sessionKey(publisher.piSessionId) === key && mirrorOwners.get(key) === publisher.owner;
+	if (state === null || (state.sessionId !== previous?.sessionId && !firstPublication)) mirrorOwners.delete(key);
 	if (state === null) sharedSessions.delete(key);
 	else sharedSessions.set(key, state);
 }
@@ -2193,7 +2198,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 					debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
 					// A missed steer may precede the first mirror or arrive while this
 					// query is still able to complete. Preserve both rebuild signals.
-					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild, priorDigests: queryMirror.digests });
+					setSessionStateFor(queryCtx.piSessionId, { ...state, sessionId, cursor, cwd, piSessionId: queryCtx.piSessionId ?? undefined, needsRebuild: queryCtx.missedSteer || state?.needsRebuild, priorDigests: queryMirror.digests }, queryMirror);
 				}
 			}
 
